@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jun  6 10:33:11 2025
+
+@author: yonradeelimsawat
+
+This script implements a Genetic Programming (GP) algorithm for symbolic regression,
+using tournament selection, tree-based individuals, and mean absolute error (MAE) as the
+fitness function.
+"""
+
+
+import random
+import operator
+import copy
+import matplotlib.pyplot as plt
+
+#GP Parameters
+POP_SIZE = 60 # Population size
+MIN_DEPTH = 2 # Minimum initial depth for trees
+MAX_DEPTH = 2 # Maximum initial depth for trees
+MAX_TREE_DEPTH = 5 # Max depth during evolution (pruning)
+CROSSOVER_RATE = 0.8
+MUTATION_RATE = 0.2
+GENERATIONS = 1000
+DESIRED_PRECISION = 0.1
+TOURNAMENT_SIZE = 3
+
+#Primitives
+def safe_div(x, y):
+    return x / y if abs(y) > 1e-6 else 1
+
+#Operator functions used in expression trees
+FUNCTIONS = {
+    'add': operator.add,
+    'sub': operator.sub,
+    'mul': operator.mul,
+    'div': safe_div
+}
+
+#Terminals: input variables and constants
+TERMINALS = ['x', 'y', -2, -1, 0, 1, 2]
+
+#Dataset 
+def generate_dataset():
+    dataset = [
+        (-1, -1, -6.33333), (-1, 0, -6), (-1, 1, -5.66667), (-1, 2, -5.33333),
+        (-1, 3, -5), (-1, 4, -4.66667), (-1, 5, -4.33333), (0, -1, -4.33333),
+        (0, 0, -4), (0, 1, -3.66667), (0, 2, -3.33333), (0, 3, -3),
+        (0, 4, -2.66667), (0, 5, -2.33333), (1, -1, -2.33333), (1, 0, -2),
+        (1, 1, -1.66667), (1, 2, -1.33333), (1, 3, -1), (1, 4, -0.666667),
+        (1, 5, -0.333333), (2, -1, -0.333333), (2, 0, 0), (2, 1, 0.333333),
+        (2, 2, 0.666667), (2, 3, 1), (2, 4, 1.33333), (2, 5, 1.66667),
+        (3, -1, 1.66667), (3, 0, 2), (3, 1, 2.33333), (3, 2, 2.66667),
+        (3, 3, 3), (3, 4, 3.33333), (3, 5, 3.66667), (4, -1, 3.66667),
+        (4, 0, 4), (4, 1, 4.33333), (4, 2, 4.66667), (4, 3, 5),
+        (4, 4, 5.33333), (4, 5, 5.66667), (5, -1, 5.66667), (5, 0, 6),
+        (5, 1, 6.33333), (5, 2, 6.66667), (5, 3, 7), (5, 4, 7.33333),
+        (5, 5, 7.66667)
+    ]
+    return dataset
+
+#Tree Structure 
+class GPTree:
+    """
+    A class representing a Genetic Programming expression tree.
+    Each node can be a function (internal node) or terminal (leaf).
+    """
+    
+    def __init__(self, data=None, left=None, right=None):
+        self.data = data
+        self.left = left
+        self.right = right
+
+    def node_label(self):
+        """Returns readable label for this node (name of function or terminal value)."""
+        return self.data.__name__ if callable(self.data) else str(self.data)
+
+    def print_tree(self, indent='', last=True):
+        """Prints the tree structure recursively in a readable format."""
+        branch = '`- ' if last else '|- '
+        print(f"{indent}{branch}{self.node_label()}")
+        indent += '   ' if last else '|  '
+        children = []
+        if self.left: children.append((self.left, False))
+        if self.right: children.append((self.right, True))
+        for child, is_last in children:
+            child.print_tree(indent, is_last)
+
+    def to_postfix(self):
+        """Returns the expression in postfix (Reverse Polish Notation)."""
+        if not self.left and not self.right:
+            return str(self.data)
+        return f"{self.left.to_postfix()} {self.right.to_postfix()} {self.node_label()}"
+
+    def evaluate(self, x, y):
+        """Recursively evaluates the tree for given input values x and y."""
+        if callable(self.data):
+            return self.data(self.left.evaluate(x, y), self.right.evaluate(x, y))
+        if self.data == 'x': return x
+        if self.data == 'y': return y
+        return self.data
+
+    def copy(self):
+        """Returns a deep copy of the entire tree."""
+        return copy.deepcopy(self)
+
+    def collect_nodes(self):
+        """Returns a list of all nodes in the tree for use in crossover/mutation."""
+        nodes = [self]
+        if self.left: nodes += self.left.collect_nodes()
+        if self.right: nodes += self.right.collect_nodes()
+        return nodes
+
+    def prune(self, max_depth, current_depth=0):
+        """Prunes the tree if it exceeds max_depth to prevent bloat."""
+        if current_depth >= max_depth:
+            self.data = random.choice(TERMINALS)
+            self.left = self.right = None
+        else:
+            if self.left: self.left.prune(max_depth, current_depth + 1)
+            if self.right: self.right.prune(max_depth, current_depth + 1)
+
+    def crossover(self, other):
+        """Performs subtree crossover with another tree."""
+        if random.random() > CROSSOVER_RATE:
+            return
+        node_self = random.choice(self.collect_nodes())
+        node_other = random.choice(other.collect_nodes())
+        (node_self.data, node_self.left, node_self.right,
+         node_other.data, node_other.left, node_other.right) = (
+            node_other.data, node_other.left, node_other.right,
+            node_self.data, node_self.left, node_self.right
+        )
+
+    def mutate(self):
+        """Performs subtree mutation by replacing part of the tree."""
+        if random.random() < MUTATION_RATE:
+            replacement = GPTree()
+            replacement.random_subtree(MAX_DEPTH, 'grow')
+            self.data, self.left, self.right = replacement.data, replacement.left,replacement.right
+        else:
+            if self.left: self.left.mutate()
+            if self.right: self.right.mutate()
+
+    def random_subtree(self, max_depth, method):
+        """
+        Generates a random subtree using either 'grow' or 'full' method.
+        - Grow: mix of terminals and functions
+        - Full: functions until the bottom, then terminals
+        """
+        p_term = len(TERMINALS) / (len(TERMINALS) + len(FUNCTIONS))
+        if max_depth == 0 or (method == 'grow' and random.random() < p_term):
+            self.data = random.choice(TERMINALS)
+            self.left = self.right = None
+            return
+        self.data = random.choice(list(FUNCTIONS.values()))
+        self.left = GPTree()
+        self.right = GPTree()
+        self.left.random_subtree(max_depth - 1, method)
+        self.right.random_subtree(max_depth - 1, method)
+
+#Population & Fitness
+def init_population():
+    """
+    Initializes the GP population using both 'full' and 'grow' methods across allowed depths.
+    Returns a list of GPTree individuals.
+    """
+    pop = []
+    depths = range(MIN_DEPTH, MAX_DEPTH + 1)
+    per_combo = POP_SIZE // (len(depths) * 2)
+    for d in depths:
+        for _ in range(per_combo):
+            t = GPTree(); t.random_subtree(d, 'full'); pop.append(t)
+        for _ in range(per_combo):
+            t = GPTree(); t.random_subtree(d, 'grow'); pop.append(t)
+    while len(pop) < POP_SIZE:
+        t = GPTree(); t.random_subtree(MAX_TREE_DEPTH, 'grow'); pop.append(t)
+    return pop
+
+def fitness(ind, dataset):
+    """
+    Calculates mean absolute error (MAE) for an individual on the dataset.
+    Lower fitness values are better.
+    """
+    errors = [abs(ind.evaluate(x, y) - result) for x, y, result in dataset]
+    return sum(errors) / len(errors)
+
+def tournament_selection(scored_population, k=TOURNAMENT_SIZE):
+    """
+    Selects the best individual out of a random sample of k individuals from the population.
+    Returns a deep copy of the selected individual.
+    """
+    competitors = random.sample(scored_population, k)
+    return min(competitors, key=lambda x: x[0])[1].copy()
+
+#Evolutionary Loop
+def evolve():
+    """
+    Runs the full GP evolutionary loop:
+    - Initializes population
+    - Applies selection, crossover, mutation, and pruning
+    - Tracks and prints the best individual
+    - Plots error over generations
+    """
+    random.seed()
+    data = generate_dataset()
+    population = init_population()
+    best, best_err = None, float('inf')
+    errors_over_time = []
+
+    for gen in range(1, GENERATIONS + 1):
+        scored = [(fitness(ind, data), ind) for ind in population]
+        scored.sort(key=lambda x: x[0])
+        err, champ = scored[0]
+        errors_over_time.append(err)
+
+        if err < best_err:
+            best_err, best = err, champ.copy()
+            print(f"[Gen {gen:04d}] New best error = {best_err:.6f}")
+        if best_err <= DESIRED_PRECISION:
+            break
+
+        new_pop = []
+        while len(new_pop) < POP_SIZE:
+            p1 = tournament_selection(scored)
+            p2 = tournament_selection(scored)
+            child = p1.copy()
+            child.crossover(p2)
+            child.mutate()
+            child.prune(MAX_TREE_DEPTH)
+            new_pop.append(child)
+        population = new_pop
+
+    print("\n=== Best Individual ===")
+    best.print_tree()
+    print("Postfix expression:", best.to_postfix())
+    print(f"Final error: {best_err:.6f} at generation {gen}")
+
+    # Plotting fitness progress
+    plt.plot(errors_over_time)
+    plt.xlabel("Generation")
+    plt.ylabel("Best Error")
+    plt.title("Fitness over Generations")
+    plt.grid(True)
+    plt.savefig("fitness_plot.png")
+    plt.show()
+
+if __name__ == "__main__":
+    evolve()
